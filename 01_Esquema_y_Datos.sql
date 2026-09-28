@@ -92,6 +92,7 @@ CREATE TABLE detalle_carrito (
 ) ENGINE=InnoDB;
 CREATE TABLE promociones (
  id_promocion INT PRIMARY KEY AUTO_INCREMENT, nombre VARCHAR(100) NOT NULL,
+ codigo VARCHAR(50) NOT NULL UNIQUE,
  id_producto INT NOT NULL, inicio DATETIME NOT NULL, fin DATETIME NOT NULL,
  descuento DECIMAL(5,2) NOT NULL CHECK(descuento > 0 AND descuento < 100),
  activo BOOLEAN NOT NULL DEFAULT TRUE, CHECK(fin > inicio),
@@ -126,10 +127,29 @@ CREATE TABLE ventas_archivo (
  id_archivo BIGINT PRIMARY KEY AUTO_INCREMENT, id_venta INT NOT NULL,
  encabezado JSON NOT NULL, detalles JSON, fecha_archivo DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
--- Bitacora manual de GRANT/REVOKE: NO intercepta sentencias de administracion.
+-- El colector automatico copia GRANT/REVOKE del general_log a esta tabla.
 CREATE TABLE cambios_permisos (
  id_cambio BIGINT PRIMARY KEY AUTO_INCREMENT, cuenta VARCHAR(288) NOT NULL,
- descripcion VARCHAR(500) NOT NULL, fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+ descripcion TEXT NOT NULL, fecha DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+ huella CHAR(64) UNIQUE, origen VARCHAR(40) NOT NULL DEFAULT 'mysql.general_log'
+) ENGINE=InnoDB;
+CREATE TABLE accesos_fallidos (
+ id_acceso BIGINT PRIMARY KEY AUTO_INCREMENT, fecha DATETIME(6) NOT NULL,
+ conexion BIGINT UNSIGNED NOT NULL, mensaje TEXT NOT NULL, huella CHAR(64) NOT NULL UNIQUE
+) ENGINE=InnoDB;
+CREATE TABLE accesos_fallidos_historico LIKE accesos_fallidos;
+CREATE TABLE cambios_permisos_historico LIKE cambios_permisos;
+CREATE TABLE control_servicio (
+ nombre VARCHAR(50) PRIMARY KEY, valor VARCHAR(255), actualizado DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB;
+CREATE TABLE respaldos (
+ id_respaldo BIGINT PRIMARY KEY AUTO_INCREMENT, id_trabajo BIGINT NOT NULL UNIQUE,
+ archivo VARCHAR(1000) NOT NULL, sha256 CHAR(64) NOT NULL, bytes BIGINT NOT NULL,
+ fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, verificado BOOLEAN NOT NULL DEFAULT FALSE
+) ENGINE=InnoDB;
+CREATE TABLE registros_purgados (
+ id BIGINT PRIMARY KEY AUTO_INCREMENT, entidad VARCHAR(50) NOT NULL, entidad_id INT NOT NULL,
+ datos JSON NOT NULL, fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 CREATE TABLE usuarios_sucursal (
  usuario VARCHAR(32) PRIMARY KEY, id_sucursal INT NOT NULL,
@@ -167,7 +187,8 @@ CREATE TABLE tamano_bd (
 CREATE TABLE trabajos_externos (
  id_trabajo BIGINT PRIMARY KEY AUTO_INCREMENT, tipo VARCHAR(50) NOT NULL, fecha DATE NOT NULL,
  estado ENUM('Pendiente','Completado','Error') NOT NULL DEFAULT 'Pendiente',
- detalle VARCHAR(500) NOT NULL, UNIQUE(tipo,fecha)
+ detalle VARCHAR(500) NOT NULL, intentos INT NOT NULL DEFAULT 0,
+ actualizado DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, UNIQUE(tipo,fecha)
 ) ENGINE=InnoDB;
 CREATE TABLE cupones_cumpleanos (
  id_cliente INT NOT NULL, anio INT NOT NULL, codigo VARCHAR(100) NOT NULL UNIQUE,
@@ -189,9 +210,9 @@ INSERT INTO productos(nombre,precio,costo,stock,sku,id_categoria,id_proveedor,st
  ('Cuaderno',20,7,100,'LIB-001',4,2,10,0.250,'C1'),('Novela',55,25,45,'LIB-002',4,2,5,0.500,'C2'),
  ('Cable USB',15,4,100,'TEC-005',2,1,20,0.050,'A5'),('Soporte',75,30,3,'TEC-006',2,1,5,0.600,'A6'),
  ('Jarron',65,28,2,'HOG-003',3,2,5,1.000,'B3'),('Agenda',40,15,0,'LIB-003',4,2,8,0.300,'C3');
--- No son credenciales utilizables: los clientes de ejemplo no tienen acceso a una aplicacion.
+-- Hash bcrypt real, coste 12, de una clave aleatoria descartada (no hay clave publicada).
 INSERT INTO clientes(nombre,apellido,email,contrasena_hash,direccion_envio,ciudad,region,fecha_nacimiento,fecha_registro)
-SELECT CONCAT('Cliente',n), 'Ejemplo', CONCAT('cliente',n,'@example.com'), '!CUENTA_DEMO_SIN_LOGIN!',
+SELECT CONCAT('Cliente',n), 'Ejemplo', CONCAT('cliente',n,'@example.com'), '$2b$12$mozrGMvsxlNdgtkgvJye/uZvplUCWPnEmJ6ph8sVBIcTXj95xYxfi',
  CONCAT('Calle de ejemplo ',n), IF(MOD(n,2)=0,'Ciudad Norte','Ciudad Centro'),
  IF(MOD(n,2)=0,'Norte','Centro'), DATE_ADD('1995-01-01',INTERVAL n MONTH),
  DATE_SUB(UTC_TIMESTAMP(),INTERVAL (240-n*7) DAY)
@@ -215,9 +236,9 @@ UPDATE clientes c SET total_gastado=COALESCE((SELECT SUM(v.total) FROM ventas v 
 UPDATE categorias c SET producto_count=(SELECT COUNT(*) FROM productos p WHERE p.id_categoria=c.id_categoria);
 INSERT INTO carritos(id_cliente,actualizado_en) VALUES (11,UTC_TIMESTAMP()-INTERVAL 5 DAY),(12,UTC_TIMESTAMP()-INTERVAL 2 DAY);
 INSERT INTO detalle_carrito VALUES (1,1,1),(1,2,1),(2,5,2);
-INSERT INTO promociones(nombre,id_producto,inicio,fin,descuento) VALUES
- ('Campana teclado',1,UTC_DATE()-INTERVAL 90 DAY,UTC_DATE()-INTERVAL 60 DAY,10),
- ('Campana hogar',5,UTC_DATE()-INTERVAL 2 DAY,UTC_DATE()+INTERVAL 5 DAY,15);
+INSERT INTO promociones(nombre,codigo,id_producto,inicio,fin,descuento) VALUES
+ ('Campana teclado','TECLADO10',1,UTC_DATE()-INTERVAL 90 DAY,UTC_DATE()-INTERVAL 60 DAY,10),
+ ('Campana hogar','HOGAR15',5,UTC_DATE()-INTERVAL 2 DAY,UTC_DATE()+INTERVAL 5 DAY,15);
 INSERT INTO visitas_producto(id_producto,id_cliente,fecha)
 SELECT p.id_producto,c.id_cliente,UTC_TIMESTAMP()-INTERVAL c.id_cliente DAY FROM productos p CROSS JOIN clientes c WHERE c.id_cliente<=p.id_producto;
 -- Observaciones simuladas para practicar rotacion; no pretenden ser reconstruccion historica real.

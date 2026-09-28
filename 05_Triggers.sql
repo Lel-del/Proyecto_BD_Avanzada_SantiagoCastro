@@ -5,6 +5,7 @@ CREATE TABLE log_cambios_precio (
  precio_anterior DECIMAL(12,2) NOT NULL, precio_nuevo DECIMAL(12,2) NOT NULL,
  usuario VARCHAR(288) NOT NULL, fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE log_cambios_precio_historico LIKE log_cambios_precio;
 DELIMITER $$
 -- 1.
 CREATE TRIGGER trg_audit_precio_producto_after_update AFTER UPDATE ON productos FOR EACH ROW
@@ -129,9 +130,10 @@ BEGIN
  IF NOT fn_ValidarFormatoEmail(NEW.email) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Email invalido'; END IF;
  IF NEW.fecha_nacimiento>UTC_DATE() THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Fecha de nacimiento futura'; END IF;
 END$$
--- 18. SOLO audita anotaciones manuales; MySQL no tiene triggers de GRANT/REVOKE.
+-- 18. El colector inserta automaticamente GRANT/REVOKE; el trigger conserva la evidencia.
+-- No se afirma que sea un trigger DDL nativo, inexistente en MySQL.
 CREATE TRIGGER trg_log_permission_changes AFTER INSERT ON cambios_permisos FOR EACH ROW
-BEGIN INSERT INTO auditoria(tipo,entidad_id,datos,usuario) VALUES('Permiso documentado',NEW.id_cambio,JSON_OBJECT('cuenta',NEW.cuenta,'descripcion',NEW.descripcion),USER()); END$$
+BEGIN INSERT INTO auditoria(tipo,entidad_id,datos,usuario) VALUES('Sentencia de permisos',NEW.id_cambio,JSON_OBJECT('cuenta',NEW.cuenta,'sentencia',NEW.descripcion,'origen',NEW.origen),USER()); END$$
 -- 19.
 CREATE TRIGGER trg_assign_default_category_on_null BEFORE INSERT ON productos FOR EACH ROW
 BEGIN IF NEW.id_categoria IS NULL THEN SET NEW.id_categoria=(SELECT id_categoria FROM categorias WHERE nombre='General'); END IF; END$$

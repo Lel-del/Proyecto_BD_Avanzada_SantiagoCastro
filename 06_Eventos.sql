@@ -5,8 +5,8 @@ CREATE TABLE reporte_ventas_semanales (
  semana DATE NOT NULL,id_sucursal INT NOT NULL,pedidos INT NOT NULL,ingresos DECIMAL(18,2) NOT NULL,
  PRIMARY KEY(semana,id_sucursal)
 );
--- Se activa el planificador, pero eventos se entregan DISABLE para revisar antes de automatizar.
-SET GLOBAL event_scheduler=ON;
+-- Persistente tras reiniciar; los eventos se habilitan al finalizar 07.
+SET PERSIST event_scheduler=ON;
 DELIMITER $$
 -- 1. Ultimos siete dias completos, conservando un reporte por fecha de inicio.
 CREATE EVENT evt_generate_weekly_sales_report ON SCHEDULE EVERY 1 WEEK STARTS CURRENT_TIMESTAMP+INTERVAL 1 WEEK DISABLE
@@ -25,6 +25,12 @@ DO BEGIN
  START TRANSACTION;
  INSERT INTO auditoria_historica SELECT * FROM auditoria WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
  DELETE FROM auditoria WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
+ INSERT INTO log_cambios_precio_historico SELECT * FROM log_cambios_precio WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
+ DELETE FROM log_cambios_precio WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
+ INSERT INTO accesos_fallidos_historico SELECT * FROM accesos_fallidos WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
+ DELETE FROM accesos_fallidos WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
+ INSERT INTO cambios_permisos_historico SELECT * FROM cambios_permisos WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
+ DELETE FROM cambios_permisos WHERE fecha<UTC_TIMESTAMP()-INTERVAL 6 MONTH;
  COMMIT;
 END$$
 -- 4.
@@ -42,9 +48,12 @@ DO BEGIN
  INSERT INTO reabastecimiento SELECT id_producto,stock,GREATEST(stock_minimo*2-stock,1),UTC_DATE() FROM productos WHERE activo AND stock<stock_minimo;
  COMMIT;
 END$$
--- 7. Cola para mantenimiento externo; no reconstruye indices silenciosamente cada semana.
+-- 7. Reconstruccion real InnoDB (recreate + analyze) de las tablas de mayor uso.
 CREATE EVENT evt_rebuild_indexes_weekly ON SCHEDULE EVERY 1 WEEK STARTS CURRENT_TIMESTAMP+INTERVAL 1 WEEK DISABLE
-DO INSERT IGNORE INTO trabajos_externos(tipo,fecha,detalle) VALUES('Revision indices',UTC_DATE(),'DBA: revisar EXPLAIN y estadisticas; OPTIMIZE TABLE solo si se justifica. Pendiente, no ejecutado.')$$
+DO BEGIN
+ OPTIMIZE TABLE productos,ventas,detalle_ventas;
+ INSERT INTO auditoria(tipo,datos,usuario) VALUES('Indices reconstruidos',JSON_OBJECT('tablas','productos,ventas,detalle_ventas'),USER());
+END$$
 -- 8. Sin actividad por mas de un anio, no suspende clientes con pedidos en curso.
 CREATE EVENT evt_suspend_inactive_accounts_quarterly ON SCHEDULE EVERY 3 MONTH STARTS CURRENT_TIMESTAMP+INTERVAL 3 MONTH DISABLE
 DO UPDATE clientes c SET activo=FALSE WHERE activo AND COALESCE(ultima_compra,fecha_registro)<UTC_TIMESTAMP()-INTERVAL 1 YEAR
@@ -77,9 +86,9 @@ DO BEGIN
  INSERT INTO rankings_productos SELECT p.id_producto,ROW_NUMBER() OVER(ORDER BY COALESCE(SUM(IF(v.estado IN ('Pagado','Procesando','Enviado','Entregado'),d.cantidad*d.precio_unitario_congelado,0)),0) DESC,p.id_producto),COALESCE(SUM(IF(v.estado IN ('Pagado','Procesando','Enviado','Entregado'),d.cantidad*d.precio_unitario_congelado,0)),0),UTC_TIMESTAMP() FROM productos p LEFT JOIN detalle_ventas d USING(id_producto) LEFT JOIN ventas v USING(id_venta) GROUP BY p.id_producto;
  COMMIT;
 END$$
--- 13. Solicitud de backup EXTERNO. Un evento SQL no ejecuta mysqldump ni crea un backup recuperable.
-CREATE EVENT evt_backup_critical_tables_daily ON SCHEDULE EVERY 1 DAY STARTS CURRENT_TIMESTAMP+INTERVAL 1 DAY DISABLE
-DO INSERT IGNORE INTO trabajos_externos(tipo,fecha,detalle) VALUES('Backup logico',UTC_DATE(),'Pendiente de trabajador externo: mysqldump con rutinas/eventos/triggers; verificar restauracion fuera de este servidor.')$$
+-- 13. El servicio incluido consume la solicitud y ejecuta mysqldump, SHA-256 y manifiesto.
+CREATE EVENT evt_backup_critical_tables_daily ON SCHEDULE EVERY 1 DAY STARTS (CURRENT_DATE+INTERVAL 1 DAY+INTERVAL 2 HOUR) DISABLE
+DO INSERT IGNORE INTO trabajos_externos(tipo,fecha,detalle) VALUES('Backup logico',UTC_DATE(),'Respaldo SQL completo procesado por servicio_operaciones.py')$$
 -- 14. No hay reserva de stock en carritos, solo al crear ventas.
 CREATE EVENT evt_clear_abandoned_carts_daily ON SCHEDULE EVERY 1 DAY STARTS CURRENT_TIMESTAMP+INTERVAL 1 DAY DISABLE
 DO BEGIN
@@ -122,8 +131,36 @@ DO BEGIN
 END$$
 -- 20. Solo canceladas sin pagos ni carritos vinculados. Trigger archiva antes de borrar.
 CREATE EVENT evt_purge_soft_deleted_records_weekly ON SCHEDULE EVERY 1 WEEK STARTS CURRENT_TIMESTAMP+INTERVAL 1 WEEK DISABLE
-DO DELETE FROM ventas WHERE estado='Cancelado' AND eliminado_en<UTC_TIMESTAMP()-INTERVAL 30 DAY
+DO BEGIN
+ DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END;
+ START TRANSACTION;
+ DELETE FROM ventas WHERE estado='Cancelado' AND eliminado_en<UTC_TIMESTAMP()-INTERVAL 30 DAY
  AND NOT EXISTS(SELECT 1 FROM pagos p WHERE p.id_venta=ventas.id_venta)
- AND NOT EXISTS(SELECT 1 FROM carritos c WHERE c.id_venta=ventas.id_venta)$$
+ AND NOT EXISTS(SELECT 1 FROM carritos c WHERE c.id_venta=ventas.id_venta);
+ -- Con FK historica se conserva la identidad; los datos personales ya se anonimizan.
+ INSERT INTO registros_purgados(entidad,entidad_id,datos)
+ SELECT 'productos',p.id_producto,JSON_OBJECT('nombre',p.nombre,'sku',p.sku) FROM productos p
+ WHERE p.eliminado_en<UTC_TIMESTAMP()-INTERVAL 30 DAY AND NOT EXISTS(SELECT 1 FROM detalle_ventas d WHERE d.id_producto=p.id_producto);
+ DELETE i FROM inventario_diario i JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=i.id_producto;
+ DELETE m FROM movimientos_stock m JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=m.id_producto;
+ DELETE v FROM visitas_producto v JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=v.id_producto;
+ DELETE d FROM detalle_carrito d JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=d.id_producto;
+ DELETE x FROM promociones x JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=x.id_producto;
+ DELETE x FROM resenas x JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=x.id_producto;
+ DELETE x FROM reabastecimiento x JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=x.id_producto;
+ DELETE x FROM rankings_productos x JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=x.id_producto;
+ DELETE p FROM productos p JOIN registros_purgados r ON r.entidad='productos' AND r.entidad_id=p.id_producto;
+ INSERT INTO registros_purgados(entidad,entidad_id,datos)
+ SELECT 'clientes',c.id_cliente,JSON_OBJECT('anonimizado',TRUE) FROM clientes c WHERE c.eliminado_en<UTC_TIMESTAMP()-INTERVAL 30 DAY
+ AND NOT EXISTS(SELECT 1 FROM ventas v WHERE v.id_cliente=c.id_cliente);
+ UPDATE clientes c JOIN registros_purgados r ON r.entidad='clientes' AND r.entidad_id=c.id_referente SET c.id_referente=NULL;
+ UPDATE visitas_producto v JOIN registros_purgados r ON r.entidad='clientes' AND r.entidad_id=v.id_cliente SET v.id_cliente=NULL;
+ DELETE d FROM detalle_carrito d JOIN carritos c USING(id_carrito) JOIN registros_purgados r ON r.entidad='clientes' AND r.entidad_id=c.id_cliente;
+ DELETE c FROM carritos c JOIN registros_purgados r ON r.entidad='clientes' AND r.entidad_id=c.id_cliente;
+ DELETE c FROM cupones_cumpleanos c JOIN registros_purgados r ON r.entidad='clientes' AND r.entidad_id=c.id_cliente;
+ DELETE c FROM resenas c JOIN registros_purgados r ON r.entidad='clientes' AND r.entidad_id=c.id_cliente;
+ DELETE c FROM clientes c JOIN registros_purgados r ON r.entidad='clientes' AND r.entidad_id=c.id_cliente;
+ COMMIT;
+END$$
 DELIMITER ;
--- Activacion consciente, ejemplo: ALTER EVENT evt_generate_reorder_list_daily ENABLE;
+-- 07 habilita los 20 eventos al completar todas sus dependencias.
