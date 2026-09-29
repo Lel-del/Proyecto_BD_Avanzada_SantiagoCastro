@@ -246,30 +246,33 @@ GRANT EXECUTE ON PROCEDURE ecommerce.sp_GenerarReporteMensualVentas TO 'Gerente_
 GRANT EXECUTE ON PROCEDURE ecommerce.sp_ObtenerHistorialComprasCliente TO 'Atencion_Cliente';
 
 -- Acceso de lectura a TODAS las tablas de negocio mediante un esquema de vistas.
+-- Listas cerradas: nuevas columnas internas nunca se publican automaticamente.
+-- 02 requiere nombres para VIP/carritos, fechas para cohortes y costos para margen/rotacion.
+-- Se excluyen autenticacion, contactos, direcciones exactas, codigos y payloads libres.
 -- Las tablas de auditoria/operacion del servicio quedan excluidas expresamente.
 -- MySQL no tiene RLS nativo: conceder SELECT directo en ventas eludiria la sucursal.
 CREATE DATABASE IF NOT EXISTS analitica CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.sucursales AS SELECT * FROM ecommerce.sucursales;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.categorias AS SELECT * FROM ecommerce.categorias;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.proveedores AS SELECT * FROM ecommerce.proveedores;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.productos AS SELECT * FROM ecommerce.productos;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.clientes AS SELECT c.* FROM ecommerce.clientes c
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.sucursales AS SELECT id_sucursal,nombre FROM ecommerce.sucursales;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.categorias AS SELECT id_categoria,nombre,descripcion,id_padre,producto_count FROM ecommerce.categorias;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.proveedores AS SELECT id_proveedor,nombre FROM ecommerce.proveedores;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.productos AS SELECT id_producto,nombre,descripcion,precio,costo,stock,sku,activo,id_categoria,id_proveedor,stock_minimo FROM ecommerce.productos;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.clientes AS SELECT c.id_cliente,c.nombre,c.apellido,c.ciudad,c.region,c.fecha_registro,c.total_gastado,c.ultima_compra,c.nivel_lealtad,c.activo FROM ecommerce.clientes c
 WHERE EXISTS(SELECT 1 FROM ecommerce.v_ventas_sucursal v WHERE v.id_cliente=c.id_cliente)
 OR NOT EXISTS(SELECT 1 FROM ecommerce.ventas v WHERE v.id_cliente=c.id_cliente);
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.ventas AS SELECT * FROM ecommerce.v_ventas_sucursal;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.detalle_ventas AS SELECT * FROM ecommerce.v_detalles_sucursal;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.devoluciones AS SELECT * FROM ecommerce.v_devoluciones_sucursal;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.pagos AS SELECT * FROM ecommerce.v_pagos_sucursal;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.resenas AS SELECT r.* FROM ecommerce.resenas r JOIN analitica.clientes c USING(id_cliente);
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.carritos AS SELECT r.* FROM ecommerce.carritos r JOIN analitica.clientes c USING(id_cliente);
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.detalle_carrito AS SELECT d.* FROM ecommerce.detalle_carrito d JOIN analitica.carritos c USING(id_carrito);
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.promociones AS SELECT * FROM ecommerce.promociones;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.visitas_producto AS SELECT v.* FROM ecommerce.visitas_producto v
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.ventas AS SELECT id_venta,id_cliente,id_sucursal,fecha_venta,estado,total,ciudad_envio,region_envio FROM ecommerce.v_ventas_sucursal;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.detalle_ventas AS SELECT id_detalle,id_venta,id_producto,cantidad,precio_unitario_congelado,costo_unitario_congelado FROM ecommerce.v_detalles_sucursal;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.devoluciones AS SELECT id_devolucion,id_detalle,cantidad,credito,fecha FROM ecommerce.v_devoluciones_sucursal;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.pagos AS SELECT id_pago,id_venta,monto,resultado,fecha FROM ecommerce.v_pagos_sucursal;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.resenas AS SELECT r.id_resena,r.id_cliente,r.id_producto,r.calificacion,r.fecha FROM ecommerce.resenas r JOIN analitica.clientes c USING(id_cliente);
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.carritos AS SELECT r.id_carrito,r.id_cliente,r.actualizado_en,r.estado,r.id_venta FROM ecommerce.carritos r JOIN analitica.clientes c USING(id_cliente);
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.detalle_carrito AS SELECT d.id_carrito,d.id_producto,d.cantidad FROM ecommerce.detalle_carrito d JOIN analitica.carritos c USING(id_carrito);
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.promociones AS SELECT id_promocion,nombre,id_producto,inicio,fin,descuento,activo FROM ecommerce.promociones;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.visitas_producto AS SELECT v.id_visita,v.id_producto,v.id_cliente,v.fecha FROM ecommerce.visitas_producto v
 WHERE id_cliente IS NULL OR EXISTS(SELECT 1 FROM analitica.clientes c WHERE c.id_cliente=v.id_cliente);
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.inventario_diario AS SELECT * FROM ecommerce.inventario_diario;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.usuarios_sucursal AS SELECT * FROM ecommerce.usuarios_sucursal WHERE usuario=SUBSTRING_INDEX(USER(),'@',1);
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.notificaciones AS SELECT n.* FROM ecommerce.notificaciones n JOIN ecommerce.v_ventas_sucursal v ON v.id_venta=n.entidad_id;
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.reabastecimiento AS SELECT * FROM ecommerce.reabastecimiento;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.inventario_diario AS SELECT fecha,id_producto,stock,costo FROM ecommerce.inventario_diario;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.usuarios_sucursal AS SELECT id_sucursal FROM ecommerce.usuarios_sucursal WHERE usuario=SUBSTRING_INDEX(USER(),'@',1);
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.notificaciones AS SELECT n.id_notificacion,n.tipo,n.entidad_id,n.fecha,n.enviado FROM ecommerce.notificaciones n JOIN ecommerce.v_ventas_sucursal v ON v.id_venta=n.entidad_id;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.reabastecimiento AS SELECT id_producto,stock,sugerido,fecha FROM ecommerce.reabastecimiento;
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.resumen_ventas_diarias AS
 SELECT DATE(fecha_venta) fecha,id_sucursal,COUNT(*) pedidos,SUM(total) ingresos FROM ecommerce.v_ventas_sucursal WHERE estado IN ('Pagado','Procesando','Enviado','Entregado') GROUP BY DATE(fecha_venta),id_sucursal;
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.rankings_productos AS
@@ -284,9 +287,9 @@ SELECT CAST(DATE_FORMAT(v.fecha_venta,'%Y-%m-01') AS DATE) mes,p.id_proveedor,SU
 FROM ecommerce.v_ventas_sucursal v JOIN ecommerce.v_detalles_sucursal d USING(id_venta) JOIN ecommerce.productos p USING(id_producto)
 WHERE v.estado IN ('Pagado','Procesando','Enviado','Entregado') GROUP BY mes,p.id_proveedor;
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.reporte_ventas_semanales AS
-SELECT r.* FROM ecommerce.reporte_ventas_semanales r WHERE EXISTS(SELECT 1 FROM ecommerce.usuarios_sucursal u WHERE u.id_sucursal=r.id_sucursal AND u.usuario=SUBSTRING_INDEX(USER(),'@',1));
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.cupones_cumpleanos AS SELECT r.* FROM ecommerce.cupones_cumpleanos r JOIN analitica.clientes c USING(id_cliente);
-CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.staging_importacion AS SELECT * FROM ecommerce.staging_importacion;
+SELECT r.semana,r.id_sucursal,r.pedidos,r.ingresos FROM ecommerce.reporte_ventas_semanales r WHERE EXISTS(SELECT 1 FROM ecommerce.usuarios_sucursal u WHERE u.id_sucursal=r.id_sucursal AND u.usuario=SUBSTRING_INDEX(USER(),'@',1));
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.cupones_cumpleanos AS SELECT r.id_cliente,r.anio FROM ecommerce.cupones_cumpleanos r JOIN analitica.clientes c USING(id_cliente);
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW analitica.staging_importacion AS SELECT id,creado_en FROM ecommerce.staging_importacion;
 GRANT SELECT ON analitica.* TO 'Analista_Datos';
 
 -- Se habilitan al final de la instalacion, cuando todas las dependencias existen.
