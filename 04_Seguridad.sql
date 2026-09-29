@@ -48,10 +48,11 @@ REVOKE IF EXISTS SELECT ON ecommerce.promociones FROM 'Analista_Datos';
 GRANT SELECT (id_promocion,nombre,id_producto,inicio,fin,descuento,activo) ON ecommerce.promociones TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.inventario_diario FROM 'Analista_Datos';
 GRANT SELECT (fecha,id_producto,stock,costo) ON ecommerce.inventario_diario TO 'Analista_Datos';
--- 4,14. Se demuestra REVOKE antes de conceder el rol a ningun usuario.
+-- 4,14. Stock solo por sp_AjustarNivelStock; ubicacion conserva el ajuste operativo.
 GRANT SELECT ON ecommerce.productos TO 'Empleado_Inventario';
-GRANT UPDATE(stock,ubicacion,precio) ON ecommerce.productos TO 'Empleado_Inventario';
-REVOKE UPDATE(precio) ON ecommerce.productos FROM 'Empleado_Inventario';
+REVOKE IF EXISTS UPDATE(stock,precio) ON ecommerce.productos FROM 'Empleado_Inventario';
+GRANT UPDATE(ubicacion) ON ecommerce.productos TO 'Empleado_Inventario';
+-- EXECUTE se concede en 07, una vez creado el procedimiento.
 -- 5,13. Sin SELECT directo a clientes que permita eludir la vista.
 GRANT SELECT ON ecommerce.v_info_clientes_basica TO 'Atencion_Cliente';
 GRANT SELECT ON ecommerce.v_ventas_sucursal TO 'Atencion_Cliente';

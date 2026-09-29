@@ -79,6 +79,7 @@ CREATE PROCEDURE sp_ObtenerHistorialComprasCliente(IN p_cliente INT)
 BEGIN SELECT * FROM v_ventas_sucursal WHERE id_cliente=p_cliente ORDER BY fecha_venta DESC,id_venta; END$$
 -- 6. Delta positivo o negativo, con motivo obligatorio.
 CREATE PROCEDURE sp_AjustarNivelStock(IN p_producto INT,IN p_delta INT,IN p_motivo VARCHAR(300))
+SQL SECURITY DEFINER
 BEGIN
  DECLARE v_stock INT;
  DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN ROLLBACK; RESIGNAL; END;
@@ -242,6 +243,7 @@ BEGIN
 END$$
 DELIMITER ;
 -- Permisos de 04 que requieren que los procedimientos ya existan.
+GRANT EXECUTE ON PROCEDURE ecommerce.sp_AjustarNivelStock TO 'Empleado_Inventario';
 GRANT EXECUTE ON PROCEDURE ecommerce.sp_GenerarReporteMensualVentas TO 'Gerente_Marketing';
 GRANT EXECUTE ON PROCEDURE ecommerce.sp_ObtenerHistorialComprasCliente TO 'Atencion_Cliente';
 
