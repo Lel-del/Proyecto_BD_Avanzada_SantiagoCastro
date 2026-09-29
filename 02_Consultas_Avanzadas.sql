@@ -27,28 +27,39 @@ SELECT a.id_producto producto_a,b.id_producto producto_b,COUNT(*) pedidos_juntos
 FROM detalle_ventas a JOIN detalle_ventas b ON a.id_venta=b.id_venta AND a.id_producto<b.id_producto
 JOIN ventas v ON v.id_venta=a.id_venta WHERE v.estado IN ('Pagado','Procesando','Enviado','Entregado')
 GROUP BY a.id_producto,b.id_producto ORDER BY pedidos_juntos DESC,producto_a,producto_b;
--- 8. Rotacion a costo en los ultimos 30 dias completos. NULL si no hay inventario promedio positivo.
+-- 8. Rotacion por sucursal; sin historia local suficiente devuelve NULL, no historia inventada.
 WITH salidas AS (
- SELECT p.id_categoria,SUM(d.cantidad*d.costo_unitario_congelado) costo_ventas FROM detalle_ventas d JOIN ventas v USING(id_venta) JOIN productos p USING(id_producto)
- WHERE v.estado IN ('Pagado','Procesando','Enviado','Entregado') AND v.fecha_venta>=UTC_DATE()-INTERVAL 30 DAY AND v.fecha_venta<UTC_DATE() GROUP BY p.id_categoria
+ SELECT v.id_sucursal,d.id_categoria_historica AS id_categoria,SUM(d.cantidad*d.costo_unitario_congelado) costo_ventas
+ FROM detalle_ventas d JOIN ventas v USING(id_venta) JOIN productos p USING(id_producto)
+ WHERE v.estado IN ('Pagado','Procesando','Enviado','Entregado') AND v.fecha_venta>=UTC_DATE()-INTERVAL 30 DAY AND v.fecha_venta<UTC_DATE()
+ GROUP BY v.id_sucursal,d.id_categoria_historica
 ), diarios AS (
- SELECT i.fecha,p.id_categoria,SUM(i.stock*i.costo) valor FROM inventario_diario i JOIN productos p USING(id_producto)
- WHERE i.fecha>=UTC_DATE()-INTERVAL 30 DAY AND i.fecha<UTC_DATE() GROUP BY i.fecha,p.id_categoria
-), promedio AS (SELECT id_categoria,AVG(valor) inventario_promedio,COUNT(*) dias_observados FROM diarios GROUP BY id_categoria)
-SELECT c.nombre,COALESCE(s.costo_ventas,0) costo_ventas,pr.inventario_promedio,pr.dias_observados,
+ SELECT i.fecha,i.id_sucursal,i.id_categoria_historica AS id_categoria,SUM(i.stock*i.costo) valor FROM inventario_diario i JOIN productos p USING(id_producto)
+ WHERE i.fecha>=UTC_DATE()-INTERVAL 30 DAY AND i.fecha<UTC_DATE() GROUP BY i.fecha,i.id_sucursal,i.id_categoria_historica
+), promedio AS (SELECT id_sucursal,id_categoria,AVG(valor) inventario_promedio,COUNT(*) dias_observados FROM diarios GROUP BY id_sucursal,id_categoria)
+SELECT su.id_sucursal,c.nombre,COALESCE(s.costo_ventas,0) costo_ventas,pr.inventario_promedio,pr.dias_observados,
  ROUND(COALESCE(s.costo_ventas,0)/NULLIF(pr.inventario_promedio,0),4) rotacion
-FROM categorias c LEFT JOIN salidas s USING(id_categoria) LEFT JOIN promedio pr USING(id_categoria);
--- 9. Reabastecimiento.
-SELECT id_producto,nombre,stock,stock_minimo FROM productos WHERE activo AND stock<stock_minimo ORDER BY stock,id_producto;
+FROM (SELECT DISTINCT id_sucursal FROM inventario_sucursal) su CROSS JOIN categorias c
+LEFT JOIN salidas s ON s.id_sucursal=su.id_sucursal AND s.id_categoria=c.id_categoria
+LEFT JOIN promedio pr ON pr.id_sucursal=su.id_sucursal AND pr.id_categoria=c.id_categoria;
+-- 9. Reabastecimiento independiente por sucursal.
+SELECT i.id_sucursal,p.id_producto,p.nombre,i.stock,i.stock_minimo
+FROM inventario_sucursal i JOIN productos p USING(id_producto)
+WHERE p.activo AND i.stock<i.stock_minimo ORDER BY i.id_sucursal,i.stock,p.id_producto;
 -- 10. Carritos abiertos sin conversion, inactivos al menos 24 horas.
 SELECT c.id_cliente,c.nombre,ca.id_carrito,ca.actualizado_en,COUNT(*) productos
 FROM carritos ca JOIN clientes c USING(id_cliente) JOIN detalle_carrito d USING(id_carrito)
 WHERE ca.estado='Abierto' AND ca.id_venta IS NULL AND ca.actualizado_en<UTC_TIMESTAMP()-INTERVAL 24 HOUR
 GROUP BY c.id_cliente,c.nombre,ca.id_carrito,ca.actualizado_en;
--- 11. Proveedores por unidades; atribucion al proveedor ACTUAL.
+-- 11. Proveedor congelado al vender; conserva etiquetas historicas y proveedores sin ventas.
+WITH identidad AS (
+ SELECT id_proveedor,nombre FROM proveedores
+ UNION SELECT id_proveedor_historico,proveedor_historico FROM detalle_ventas WHERE id_proveedor_historico IS NOT NULL
+)
 SELECT pr.id_proveedor,pr.nombre,COALESCE(SUM(IF(v.estado IN ('Pagado','Procesando','Enviado','Entregado'),d.cantidad,0)),0) unidades
-FROM proveedores pr LEFT JOIN productos p USING(id_proveedor) LEFT JOIN detalle_ventas d USING(id_producto) LEFT JOIN ventas v USING(id_venta)
-GROUP BY pr.id_proveedor,pr.nombre ORDER BY unidades DESC,pr.id_proveedor;
+FROM identidad pr LEFT JOIN detalle_ventas d ON d.id_proveedor_historico=pr.id_proveedor AND d.proveedor_historico=pr.nombre
+LEFT JOIN ventas v USING(id_venta)
+GROUP BY pr.id_proveedor,pr.nombre ORDER BY unidades DESC,pr.id_proveedor,pr.nombre;
 -- 12. Geografia historica de envio (no direccion actual del cliente).
 SELECT region_envio,ciudad_envio,COUNT(*) pedidos,SUM(total) ingresos FROM ventas WHERE estado IN ('Pagado','Procesando','Enviado','Entregado') GROUP BY region_envio,ciudad_envio ORDER BY ingresos DESC;
 -- 13. Horas pico en UTC.
@@ -96,5 +107,5 @@ SELECT *,CASE WHEN r>=4 AND f>=4 AND m>=4 THEN 'VIP' WHEN r<=2 THEN 'En riesgo' 
 -- 20. Media movil de 3 meses COMPLETOS, incluidos meses con cero ventas.
 SET @categoria_prediccion=2;
 WITH meses AS (SELECT CAST(DATE_FORMAT(UTC_DATE()-INTERVAL 1 MONTH,'%Y-%m-01') AS DATE) mes UNION ALL SELECT CAST(DATE_FORMAT(UTC_DATE()-INTERVAL 2 MONTH,'%Y-%m-01') AS DATE) UNION ALL SELECT CAST(DATE_FORMAT(UTC_DATE()-INTERVAL 3 MONTH,'%Y-%m-01') AS DATE)),
- volumen AS (SELECT CAST(DATE_FORMAT(v.fecha_venta,'%Y-%m-01') AS DATE) mes,SUM(d.cantidad) unidades FROM ventas v JOIN detalle_ventas d USING(id_venta) JOIN productos p USING(id_producto) WHERE v.estado IN ('Pagado','Procesando','Enviado','Entregado') AND p.id_categoria=@categoria_prediccion GROUP BY mes)
+ volumen AS (SELECT CAST(DATE_FORMAT(v.fecha_venta,'%Y-%m-01') AS DATE) mes,SUM(d.cantidad) unidades FROM ventas v JOIN detalle_ventas d USING(id_venta) JOIN productos p USING(id_producto) WHERE v.estado IN ('Pagado','Procesando','Enviado','Entregado') AND d.id_categoria_historica=@categoria_prediccion GROUP BY mes)
 SELECT @categoria_prediccion id_categoria,DATE_FORMAT(UTC_DATE()+INTERVAL 1 MONTH,'%Y-%m') mes_proyectado,ROUND(AVG(COALESCE(v.unidades,0)),2) unidades_estimadas FROM meses m LEFT JOIN volumen v USING(mes);

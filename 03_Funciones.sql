@@ -4,8 +4,11 @@ DELIMITER $$
 CREATE FUNCTION fn_CalcularTotalVenta(p_id INT) RETURNS DECIMAL(16,2) READS SQL DATA
 BEGIN RETURN (SELECT COALESCE(SUM(cantidad*precio_unitario_congelado),0) FROM detalle_ventas WHERE id_venta=p_id); END$$
 -- 2.
-CREATE FUNCTION fn_VerificarDisponibilidadStock(p_id INT,p_cantidad INT) RETURNS BOOLEAN READS SQL DATA
-BEGIN RETURN COALESCE((SELECT activo AND stock>=p_cantidad AND p_cantidad>0 FROM productos WHERE id_producto=p_id),FALSE); END$$
+CREATE FUNCTION fn_VerificarDisponibilidadStock(p_sucursal INT,p_id INT,p_cantidad INT) RETURNS BOOLEAN READS SQL DATA
+BEGIN
+ IF p_sucursal IS NULL OR (SUBSTRING_INDEX(USER(),'@',1) NOT IN ('root','admin_user') AND NOT EXISTS(SELECT 1 FROM usuarios_sucursal WHERE usuario=SUBSTRING_INDEX(USER(),'@',1) AND id_sucursal=p_sucursal)) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Sucursal no autorizada'; END IF;
+ RETURN COALESCE((SELECT p.activo AND i.stock>=p_cantidad AND p_cantidad>0 FROM inventario_sucursal i JOIN productos p USING(id_producto) WHERE i.id_sucursal=p_sucursal AND i.id_producto=p_id),FALSE);
+END$$
 -- 3.
 CREATE FUNCTION fn_ObtenerPrecioProducto(p_id INT) RETURNS DECIMAL(12,2) READS SQL DATA
 BEGIN RETURN (SELECT precio FROM productos WHERE id_producto=p_id); END$$
@@ -58,8 +61,11 @@ BEGIN
  RETURN ROUND(fn_CalcularTotalVenta(p_id)*p_tasa/100,2);
 END$$
 -- 17.
-CREATE FUNCTION fn_ObtenerStockTotalPorCategoria(p_id INT) RETURNS BIGINT READS SQL DATA
-BEGIN RETURN (SELECT COALESCE(SUM(stock),0) FROM productos WHERE id_categoria=p_id); END$$
+CREATE FUNCTION fn_ObtenerStockTotalPorCategoria(p_sucursal INT,p_id INT) RETURNS BIGINT READS SQL DATA
+BEGIN
+ IF p_sucursal IS NULL OR (SUBSTRING_INDEX(USER(),'@',1) NOT IN ('root','admin_user') AND NOT EXISTS(SELECT 1 FROM usuarios_sucursal WHERE usuario=SUBSTRING_INDEX(USER(),'@',1) AND id_sucursal=p_sucursal)) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Sucursal no autorizada'; END IF;
+ RETURN (SELECT COALESCE(SUM(i.stock),0) FROM inventario_sucursal i JOIN productos p USING(id_producto) WHERE p.id_categoria=p_id AND i.id_sucursal=p_sucursal);
+END$$
 -- 18. Dias naturales: Centro 2, Norte 3, otras regiones 5.
 CREATE FUNCTION fn_EstimarFechaEntrega(p_id INT) RETURNS DATE READS SQL DATA
 BEGIN RETURN (SELECT DATE(fecha_venta)+INTERVAL (CASE region_envio WHEN 'Centro' THEN 2 WHEN 'Norte' THEN 3 ELSE 5 END) DAY FROM ventas WHERE id_venta=p_id); END$$

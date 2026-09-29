@@ -15,21 +15,29 @@ END$$
 -- 2. Se reserva inventario al insertar LINEAS, no un encabezado sin productos.
 CREATE TRIGGER trg_check_stock_before_insert_venta BEFORE INSERT ON detalle_ventas FOR EACH ROW
 BEGIN
- DECLARE v_estado VARCHAR(30); DECLARE v_stock INT; DECLARE v_activo BOOLEAN;
+ DECLARE v_sucursal INT; DECLARE v_estado VARCHAR(30); DECLARE v_stock INT; DECLARE v_activo BOOLEAN;
  DECLARE v_precio DECIMAL(12,2); DECLARE v_costo DECIMAL(12,2);
- SELECT estado INTO v_estado FROM ventas WHERE id_venta=NEW.id_venta FOR UPDATE;
+ DECLARE v_categoria INT; DECLARE v_proveedor INT;
+ SELECT estado,id_sucursal INTO v_estado,v_sucursal FROM ventas WHERE id_venta=NEW.id_venta FOR UPDATE;
  IF v_estado IS NULL OR v_estado<>'Pendiente de Pago' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Solo se agregan lineas a pedidos pendientes'; END IF;
- SELECT stock,activo,precio,costo INTO v_stock,v_activo,v_precio,v_costo FROM productos WHERE id_producto=NEW.id_producto FOR UPDATE;
+ SELECT activo,precio,costo,id_categoria,id_proveedor INTO v_activo,v_precio,v_costo,v_categoria,v_proveedor FROM productos WHERE id_producto=NEW.id_producto FOR SHARE;
+ SELECT stock INTO v_stock FROM inventario_sucursal WHERE id_sucursal=v_sucursal AND id_producto=NEW.id_producto FOR UPDATE;
  IF v_stock IS NULL OR NOT v_activo OR NEW.cantidad IS NULL OR NEW.cantidad<=0 OR NEW.cantidad>v_stock THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Producto inactivo o stock insuficiente'; END IF;
  SET NEW.precio_unitario_congelado=v_precio;
  SET NEW.costo_unitario_congelado=v_costo;
+ SET NEW.id_categoria_historica=v_categoria;
+ SET NEW.id_proveedor_historico=v_proveedor;
+ SET NEW.categoria_historica=(SELECT nombre FROM categorias WHERE id_categoria=v_categoria);
+ SET NEW.proveedor_historico=(SELECT nombre FROM proveedores WHERE id_proveedor=v_proveedor);
 END$$
 -- 3. El procedimiento NO vuelve a descontar stock.
 CREATE TRIGGER trg_update_stock_after_insert_venta AFTER INSERT ON detalle_ventas FOR EACH ROW
 BEGIN
- UPDATE productos SET stock=stock-NEW.cantidad WHERE id_producto=NEW.id_producto;
+ DECLARE v_sucursal INT;
+ SELECT id_sucursal INTO v_sucursal FROM ventas WHERE id_venta=NEW.id_venta;
+ UPDATE inventario_sucursal SET stock=stock-NEW.cantidad WHERE id_sucursal=v_sucursal AND id_producto=NEW.id_producto;
  UPDATE ventas SET total=total+NEW.cantidad*NEW.precio_unitario_congelado WHERE id_venta=NEW.id_venta;
- INSERT INTO movimientos_stock(id_producto,diferencia,motivo,usuario) VALUES(NEW.id_producto,-NEW.cantidad,CONCAT('Reserva venta ',NEW.id_venta),USER());
+ INSERT INTO movimientos_stock(id_sucursal,id_producto,diferencia,motivo,usuario) VALUES(v_sucursal,NEW.id_producto,-NEW.cantidad,CONCAT('Reserva venta ',NEW.id_venta),USER());
 END$$
 -- 4. La FK tambien protege esta regla.
 CREATE TRIGGER trg_prevent_delete_categoria_with_products BEFORE DELETE ON categorias FOR EACH ROW
@@ -49,8 +57,8 @@ BEGIN
   UPDATE clientes SET total_gastado=total_gastado+v_despues-v_antes WHERE id_cliente=NEW.id_cliente;
  END IF;
  IF NEW.estado='Cancelado' AND OLD.estado<>'Cancelado' THEN
-  INSERT INTO movimientos_stock(id_producto,diferencia,motivo,usuario) SELECT id_producto,cantidad,CONCAT('Cancelacion ',NEW.id_venta),USER() FROM detalle_ventas WHERE id_venta=NEW.id_venta;
-  UPDATE productos p JOIN detalle_ventas d ON d.id_producto=p.id_producto SET p.stock=p.stock+d.cantidad WHERE d.id_venta=NEW.id_venta;
+  INSERT INTO movimientos_stock(id_sucursal,id_producto,diferencia,motivo,usuario) SELECT NEW.id_sucursal,id_producto,cantidad,CONCAT('Cancelacion ',NEW.id_venta),USER() FROM detalle_ventas WHERE id_venta=NEW.id_venta;
+  UPDATE inventario_sucursal i JOIN detalle_ventas d ON d.id_producto=i.id_producto SET i.stock=i.stock+d.cantidad WHERE d.id_venta=NEW.id_venta AND i.id_sucursal=NEW.id_sucursal;
   IF v_antes>0 THEN INSERT INTO notificaciones(tipo,entidad_id,contenido) VALUES('Credito cancelacion',NEW.id_venta,JSON_OBJECT('monto',OLD.total,'simulado',TRUE)); END IF;
  END IF;
 END$$
@@ -64,7 +72,7 @@ BEGIN
  END IF;
 END$$
 -- 8.
-CREATE TRIGGER trg_prevent_negative_stock BEFORE UPDATE ON productos FOR EACH ROW
+CREATE TRIGGER trg_prevent_negative_stock BEFORE UPDATE ON inventario_sucursal FOR EACH ROW
 BEGIN IF NEW.stock IS NULL OR NEW.stock<0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Stock no puede ser negativo'; END IF; END$$
 -- 9.
 CREATE TRIGGER trg_capitalize_nombre_cliente BEFORE INSERT ON clientes FOR EACH ROW
@@ -76,19 +84,21 @@ END$$
 -- 10. Lineas editables solo antes de pagar; precio y costo historicos inmutables.
 CREATE TRIGGER trg_recalculate_total_venta_on_detalle_change BEFORE UPDATE ON detalle_ventas FOR EACH ROW
 BEGIN
- DECLARE v_estado VARCHAR(30); DECLARE v_stock INT;
- SELECT estado INTO v_estado FROM ventas WHERE id_venta=OLD.id_venta FOR UPDATE;
+ DECLARE v_sucursal INT; DECLARE v_estado VARCHAR(30); DECLARE v_stock INT;
+ SELECT estado,id_sucursal INTO v_estado,v_sucursal FROM ventas WHERE id_venta=OLD.id_venta FOR UPDATE;
  IF v_estado<>'Pendiente de Pago' OR NEW.id_venta<>OLD.id_venta OR NEW.id_producto<>OLD.id_producto OR NEW.precio_unitario_congelado<>OLD.precio_unitario_congelado OR NEW.costo_unitario_congelado<>OLD.costo_unitario_congelado THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Linea historica inmutable; use devolucion'; END IF;
+ IF NOT(NEW.id_categoria_historica<=>OLD.id_categoria_historica) OR NOT(NEW.categoria_historica<=>OLD.categoria_historica) OR NOT(NEW.id_proveedor_historico<=>OLD.id_proveedor_historico) OR NOT(NEW.proveedor_historico<=>OLD.proveedor_historico) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Contexto comercial historico inmutable'; END IF;
  IF NEW.cantidad IS NULL OR NEW.cantidad<=0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Cantidad invalida'; END IF;
- SELECT stock INTO v_stock FROM productos WHERE id_producto=OLD.id_producto FOR UPDATE;
- IF NEW.cantidad-OLD.cantidad>v_stock THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Stock insuficiente al editar'; END IF;
- UPDATE productos SET stock=stock+OLD.cantidad-NEW.cantidad WHERE id_producto=OLD.id_producto;
+ SELECT stock INTO v_stock FROM inventario_sucursal WHERE id_sucursal=v_sucursal AND id_producto=OLD.id_producto FOR UPDATE;
+ IF v_stock IS NULL OR NEW.cantidad-OLD.cantidad>v_stock THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Stock insuficiente al editar'; END IF;
+ UPDATE inventario_sucursal SET stock=stock+OLD.cantidad-NEW.cantidad WHERE id_sucursal=v_sucursal AND id_producto=OLD.id_producto;
  UPDATE ventas SET total=total+(NEW.cantidad-OLD.cantidad)*OLD.precio_unitario_congelado WHERE id_venta=OLD.id_venta;
- INSERT INTO movimientos_stock(id_producto,diferencia,motivo,usuario) VALUES(OLD.id_producto,OLD.cantidad-NEW.cantidad,'Edicion de reserva',USER());
+ INSERT INTO movimientos_stock(id_sucursal,id_producto,diferencia,motivo,usuario) VALUES(v_sucursal,OLD.id_producto,OLD.cantidad-NEW.cantidad,'Edicion de reserva',USER());
 END$$
 -- 11. Maquina de estados; no permite reabrir cancelados ni cancelar entregados.
 CREATE TRIGGER trg_log_order_status_change BEFORE UPDATE ON ventas FOR EACH ROW
 BEGIN
+ IF NEW.id_cliente<>OLD.id_cliente AND NOT EXISTS(SELECT 1 FROM contexto_fusion WHERE conexion=CONNECTION_ID() AND origen=OLD.id_cliente AND destino=NEW.id_cliente) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Cliente de venta inmutable; use fusion controlada'; END IF;
  IF NEW.id_sucursal<>OLD.id_sucursal THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='La sucursal historica es inmutable'; END IF;
  IF NEW.estado<>OLD.estado THEN
   IF NOT ((OLD.estado='Pendiente de Pago' AND NEW.estado IN ('Pagado','Cancelado')) OR (OLD.estado='Pagado' AND NEW.estado IN ('Procesando','Cancelado')) OR (OLD.estado='Procesando' AND NEW.estado IN ('Enviado','Cancelado')) OR (OLD.estado='Enviado' AND NEW.estado='Entregado')) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Transicion de estado no permitida'; END IF;
@@ -101,8 +111,8 @@ END$$
 CREATE TRIGGER trg_prevent_price_zero_or_less BEFORE UPDATE ON productos FOR EACH ROW
 BEGIN IF NEW.precio IS NULL OR NEW.precio<=0 THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Precio debe ser positivo'; END IF; END$$
 -- 13. Al cruzar el umbral, evita repetir alertas en cada cambio de precio.
-CREATE TRIGGER trg_send_stock_alert_on_low_stock AFTER UPDATE ON productos FOR EACH ROW
-BEGIN IF NEW.stock<NEW.stock_minimo AND OLD.stock>=OLD.stock_minimo THEN INSERT INTO alertas(tipo,entidad_id,mensaje) VALUES('Stock bajo',NEW.id_producto,'Revisar reabastecimiento'); END IF; END$$
+CREATE TRIGGER trg_send_stock_alert_on_low_stock AFTER UPDATE ON inventario_sucursal FOR EACH ROW
+BEGIN IF NEW.stock<NEW.stock_minimo AND OLD.stock>=OLD.stock_minimo THEN INSERT INTO alertas(tipo,entidad_id,mensaje) VALUES('Stock bajo',NEW.id_producto,CONCAT('Revisar sucursal ',NEW.id_sucursal)); END IF; END$$
 -- 14. Archivo de cabecera y detalles antes de borrar. Solo canceladas, conservacion 30 dias.
 CREATE TRIGGER trg_archive_deleted_venta BEFORE DELETE ON ventas FOR EACH ROW
 BEGIN
@@ -110,7 +120,7 @@ BEGIN
  IF EXISTS(SELECT 1 FROM pagos WHERE id_venta=OLD.id_venta) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Conservar venta con movimientos financieros'; END IF;
  INSERT INTO ventas_archivo(id_venta,encabezado,detalles)
  SELECT OLD.id_venta,JSON_OBJECT('id_cliente',OLD.id_cliente,'id_sucursal',OLD.id_sucursal,'fecha',OLD.fecha_venta,'estado',OLD.estado,'total',OLD.total),
- (SELECT JSON_ARRAYAGG(JSON_OBJECT('producto',id_producto,'cantidad',cantidad,'precio',precio_unitario_congelado,'costo',costo_unitario_congelado)) FROM detalle_ventas WHERE id_venta=OLD.id_venta);
+ (SELECT JSON_ARRAYAGG(JSON_OBJECT('producto',id_producto,'cantidad',cantidad,'precio',precio_unitario_congelado,'costo',costo_unitario_congelado,'id_categoria_historica',id_categoria_historica,'categoria_historica',categoria_historica,'id_proveedor_historico',id_proveedor_historico,'proveedor_historico',proveedor_historico)) FROM detalle_ventas WHERE id_venta=OLD.id_venta);
  DELETE FROM detalle_ventas WHERE id_venta=OLD.id_venta;
 END$$
 -- 15. INSERT; complemento UPDATE al final.
@@ -149,12 +159,16 @@ BEGIN IF NEW.id_cliente<>0 AND NEW.id_referente=NEW.id_cliente THEN SIGNAL SQLST
 -- Las lineas pendientes pueden borrarse y liberar reserva. Canceladas solo durante archivo.
 CREATE TRIGGER trg_detalle_before_delete BEFORE DELETE ON detalle_ventas FOR EACH ROW
 BEGIN
- DECLARE v_estado VARCHAR(30);
- SELECT estado INTO v_estado FROM ventas WHERE id_venta=OLD.id_venta;
+ DECLARE v_estado VARCHAR(30); DECLARE v_sucursal INT;
+ SELECT estado,id_sucursal INTO v_estado,v_sucursal FROM ventas WHERE id_venta=OLD.id_venta;
+ -- El archivo de canceladas ya bloquea ventas; no volver a bloquear la tabla invocante.
  IF v_estado='Pendiente de Pago' THEN
-  UPDATE productos SET stock=stock+OLD.cantidad WHERE id_producto=OLD.id_producto;
+  SELECT estado,id_sucursal INTO v_estado,v_sucursal FROM ventas WHERE id_venta=OLD.id_venta FOR UPDATE;
+ END IF;
+ IF v_estado='Pendiente de Pago' THEN
+  UPDATE inventario_sucursal SET stock=stock+OLD.cantidad WHERE id_sucursal=v_sucursal AND id_producto=OLD.id_producto;
   UPDATE ventas SET total=total-OLD.cantidad*OLD.precio_unitario_congelado WHERE id_venta=OLD.id_venta;
-  INSERT INTO movimientos_stock(id_producto,diferencia,motivo,usuario) VALUES(OLD.id_producto,OLD.cantidad,'Eliminacion de reserva',USER());
+  INSERT INTO movimientos_stock(id_sucursal,id_producto,diferencia,motivo,usuario) VALUES(v_sucursal,OLD.id_producto,OLD.cantidad,'Eliminacion de reserva',USER());
  ELSEIF v_estado<>'Cancelado' THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Detalle pagado inmutable';
  END IF;
 END$$

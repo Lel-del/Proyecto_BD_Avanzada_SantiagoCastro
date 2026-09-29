@@ -1,25 +1,37 @@
 USE ecommerce;
 -- Ejecutar como DBA en una instalacion local de desarrollo.
--- Las cuentas nuevas son solo localhost. Se bloquean cuentas root remotas si existen.
+-- Seguridad de objetos y cuentas; las cuentas nuevas son solo localhost.
 -- 1-6,17. Administrador global de MySQL, segun el enunciado.
 CREATE ROLE IF NOT EXISTS 'Administrador_Sistema','Gerente_Marketing','Analista_Datos','Empleado_Inventario','Atencion_Cliente','Auditor_Financiero','Visitante';
 GRANT ALL PRIVILEGES ON *.* TO 'Administrador_Sistema' WITH GRANT OPTION;
 
 -- 13,19. Filtro basado en usuario CONECTADO, nunca en CURRENT_USER() del definidor.
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_ventas_sucursal AS
-SELECT v.* FROM ventas v WHERE SUBSTRING_INDEX(USER(),'@',1) IN ('root','admin_user')
+SELECT v.id_venta,v.id_cliente,v.id_sucursal,v.fecha_venta,v.estado,v.total,v.ciudad_envio,v.region_envio FROM ventas v WHERE SUBSTRING_INDEX(USER(),'@',1) IN ('root','admin_user')
 OR EXISTS(SELECT 1 FROM usuarios_sucursal u WHERE u.id_sucursal=v.id_sucursal AND u.usuario=SUBSTRING_INDEX(USER(),'@',1));
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_detalles_sucursal AS
-SELECT d.* FROM detalle_ventas d JOIN v_ventas_sucursal v USING(id_venta);
+SELECT d.id_detalle,d.id_venta,d.id_producto,d.cantidad,d.precio_unitario_congelado,d.costo_unitario_congelado,d.id_categoria_historica,d.categoria_historica,d.id_proveedor_historico,d.proveedor_historico FROM detalle_ventas d JOIN v_ventas_sucursal v USING(id_venta);
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_info_clientes_basica AS
 SELECT c.id_cliente,c.nombre,c.apellido,c.ciudad,c.region,c.fecha_registro
 FROM clientes c WHERE EXISTS(SELECT 1 FROM v_ventas_sucursal v WHERE v.id_cliente=c.id_cliente);
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_pagos_sucursal AS
-SELECT p.* FROM pagos p JOIN v_ventas_sucursal v USING(id_venta);
+SELECT p.id_pago,p.id_venta,p.monto,p.resultado,p.fecha FROM pagos p JOIN v_ventas_sucursal v USING(id_venta);
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_devoluciones_sucursal AS
-SELECT r.* FROM devoluciones r JOIN v_detalles_sucursal d USING(id_detalle);
+SELECT r.id_devolucion,r.id_detalle,r.cantidad,r.credito,r.fecha FROM devoluciones r JOIN v_detalles_sucursal d USING(id_detalle);
+-- Inventario por sucursal: la vista actualizable solo permite editar ubicacion.
+CREATE OR REPLACE ALGORITHM=MERGE SQL SECURITY DEFINER VIEW v_inventario_sucursal AS
+SELECT i.id_sucursal,i.id_producto,i.stock,i.stock_minimo,i.ubicacion
+FROM inventario_sucursal i WHERE SUBSTRING_INDEX(USER(),'@',1) IN ('root','admin_user') OR EXISTS(SELECT 1 FROM ecommerce.usuarios_sucursal u WHERE u.id_sucursal=i.id_sucursal AND u.usuario=SUBSTRING_INDEX(USER(),'@',1))
+WITH CASCADED CHECK OPTION;
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_inventario_diario_sucursal AS
+SELECT i.fecha,i.id_sucursal,i.id_producto,i.stock,i.costo,i.id_categoria_historica FROM inventario_diario i
+WHERE SUBSTRING_INDEX(USER(),'@',1) IN ('root','admin_user') OR EXISTS(SELECT 1 FROM ecommerce.usuarios_sucursal u WHERE u.id_sucursal=i.id_sucursal AND u.usuario=SUBSTRING_INDEX(USER(),'@',1));
+CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_reabastecimiento_sucursal AS
+SELECT i.id_sucursal,i.id_producto,i.stock,i.sugerido,i.fecha FROM reabastecimiento i
+WHERE SUBSTRING_INDEX(USER(),'@',1) IN ('root','admin_user') OR EXISTS(SELECT 1 FROM ecommerce.usuarios_sucursal u WHERE u.id_sucursal=i.id_sucursal AND u.usuario=SUBSTRING_INDEX(USER(),'@',1));
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_catalogo AS
-SELECT id_producto,nombre,descripcion,precio,stock,sku,id_categoria FROM productos WHERE activo;
+SELECT p.id_producto,p.nombre,p.descripcion,p.precio,i.stock,p.sku,p.id_categoria,i.id_sucursal
+FROM productos p JOIN v_inventario_sucursal i USING(id_producto) WHERE p.activo;
 -- 2. Marketing ve informacion basica y ventas de su sucursal, nunca hashes.
 GRANT SELECT ON ecommerce.v_ventas_sucursal TO 'Gerente_Marketing';
 GRANT SELECT ON ecommerce.v_detalles_sucursal TO 'Gerente_Marketing';
@@ -29,7 +41,7 @@ GRANT SELECT ON ecommerce.v_info_clientes_basica TO 'Gerente_Marketing';
 REVOKE IF EXISTS SELECT ON ecommerce.v_ventas_sucursal FROM 'Analista_Datos';
 GRANT SELECT (id_venta,id_cliente,id_sucursal,fecha_venta,estado,total,ciudad_envio,region_envio) ON ecommerce.v_ventas_sucursal TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.v_detalles_sucursal FROM 'Analista_Datos';
-GRANT SELECT (id_detalle,id_venta,id_producto,cantidad,precio_unitario_congelado,costo_unitario_congelado) ON ecommerce.v_detalles_sucursal TO 'Analista_Datos';
+GRANT SELECT (id_detalle,id_venta,id_producto,cantidad,precio_unitario_congelado,costo_unitario_congelado,id_categoria_historica,categoria_historica,id_proveedor_historico,proveedor_historico) ON ecommerce.v_detalles_sucursal TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.v_info_clientes_basica FROM 'Analista_Datos';
 GRANT SELECT (id_cliente,nombre,apellido,ciudad,region,fecha_registro) ON ecommerce.v_info_clientes_basica TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.v_pagos_sucursal FROM 'Analista_Datos';
@@ -37,7 +49,7 @@ GRANT SELECT (id_pago,id_venta,monto,resultado,fecha) ON ecommerce.v_pagos_sucur
 REVOKE IF EXISTS SELECT ON ecommerce.v_devoluciones_sucursal FROM 'Analista_Datos';
 GRANT SELECT (id_devolucion,id_detalle,cantidad,credito,fecha) ON ecommerce.v_devoluciones_sucursal TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.productos FROM 'Analista_Datos';
-GRANT SELECT (id_producto,nombre,descripcion,precio,costo,stock,sku,activo,id_categoria,id_proveedor,stock_minimo) ON ecommerce.productos TO 'Analista_Datos';
+GRANT SELECT (id_producto,nombre,descripcion,precio,costo,sku,activo,id_categoria,id_proveedor) ON ecommerce.productos TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.categorias FROM 'Analista_Datos';
 GRANT SELECT (id_categoria,nombre,descripcion,id_padre,producto_count) ON ecommerce.categorias TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.proveedores FROM 'Analista_Datos';
@@ -47,11 +59,13 @@ GRANT SELECT (id_sucursal,nombre) ON ecommerce.sucursales TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.promociones FROM 'Analista_Datos';
 GRANT SELECT (id_promocion,nombre,id_producto,inicio,fin,descuento,activo) ON ecommerce.promociones TO 'Analista_Datos';
 REVOKE IF EXISTS SELECT ON ecommerce.inventario_diario FROM 'Analista_Datos';
-GRANT SELECT (fecha,id_producto,stock,costo) ON ecommerce.inventario_diario TO 'Analista_Datos';
--- 4,14. Stock solo por sp_AjustarNivelStock; ubicacion conserva el ajuste operativo.
+GRANT SELECT ON ecommerce.v_inventario_diario_sucursal TO 'Analista_Datos';
+GRANT SELECT (id_sucursal,id_producto,stock,stock_minimo) ON ecommerce.v_inventario_sucursal TO 'Analista_Datos';
+-- 4,14. Stock solo por procedimiento; ubicacion solo en la sucursal autorizada.
 GRANT SELECT ON ecommerce.productos TO 'Empleado_Inventario';
-REVOKE IF EXISTS UPDATE(stock,precio) ON ecommerce.productos FROM 'Empleado_Inventario';
-GRANT UPDATE(ubicacion) ON ecommerce.productos TO 'Empleado_Inventario';
+REVOKE IF EXISTS UPDATE(precio) ON ecommerce.productos FROM 'Empleado_Inventario';
+GRANT SELECT ON ecommerce.v_inventario_sucursal TO 'Empleado_Inventario';
+GRANT UPDATE(ubicacion) ON ecommerce.v_inventario_sucursal TO 'Empleado_Inventario';
 -- EXECUTE se concede en 07, una vez creado el procedimiento.
 -- 5,13. Sin SELECT directo a clientes que permita eludir la vista.
 GRANT SELECT ON ecommerce.v_info_clientes_basica TO 'Atencion_Cliente';
@@ -67,18 +81,12 @@ REVOKE IF EXISTS SELECT ON ecommerce.productos FROM 'Visitante';
 GRANT SELECT ON ecommerce.v_catalogo TO 'Visitante';
 -- Pruebas manuales en una NUEVA conexion como visitor_user, nunca como DBA:
 -- SET ROLE 'Visitante';
--- SELECT costo, ubicacion FROM ecommerce.productos;
+-- SELECT costo FROM ecommerce.productos;
 -- Esperado: ERROR 1142 (42000), SELECT denegado sobre productos.
 -- SELECT * FROM ecommerce.v_catalogo;
--- Esperado: consulta permitida; solo id_producto,nombre,descripcion,precio,stock,sku,id_categoria.
+-- Esperado: consulta permitida; solo id_producto,nombre,descripcion,precio,stock,sku,id_categoria,id_sucursal.
 
--- 15. Componente oficial de MySQL Community. Requiere privilegios de administrador.
--- Si el DBA ya instalo este componente, omitir solamente la siguiente sentencia.
-INSTALL COMPONENT 'file://component_validate_password';
-SET PERSIST validate_password.policy='MEDIUM';
-SET PERSIST validate_password.length=12;
--- Para persistir estos dos valores tras reiniciar: repetir con SET PERSIST (DBA).
--- Las contrasenas de clientes de la tienda son hashes externos, no usuarios del servidor.
+-- Politica de contrasenas y hardening: 00_Configuracion_Servidor.sql.
 
 -- 7-10. Generacion aleatoria con reintento si una clave no satisface la politica.
 -- Auxiliar de instalacion: se elimina al terminar, no aumenta las 20 rutinas de negocio.
@@ -123,21 +131,8 @@ SET DEFAULT ROLE ALL TO 'admin_user'@'localhost','marketing_user'@'localhost','i
 ALTER USER 'analyst_user'@'localhost' WITH MAX_QUERIES_PER_HOUR 200 MAX_USER_CONNECTIONS 3;
 -- 12. EXECUTE de reportes: al final de 07 para respetar dependencias.
 
--- 16. Ejecutar desde root LOCAL: bloquea todas las identidades root remotas.
-SET SESSION group_concat_max_len=65535;
-SELECT GROUP_CONCAT(CONCAT(QUOTE(User),'@',QUOTE(Host)) SEPARATOR ',') INTO @root_remotos
-FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1');
-SET @bloquear_root=IF(@root_remotos IS NULL,'DO 0',CONCAT('ALTER USER ',@root_remotos,' ACCOUNT LOCK'));
-PREPARE bloquear FROM @bloquear_root;
-EXECUTE bloquear;
-DEALLOCATE PREPARE bloquear;
--- Resultado esperado vacio: ninguna cuenta root remota desbloqueada.
-SELECT User,Host FROM mysql.user WHERE User='root' AND Host NOT IN ('localhost','127.0.0.1','::1') AND account_locked='N';
--- 20. Captura nativa de conexiones rechazadas y sentencias de permisos.
--- El servicio incluido conserva una copia deduplicada en las tablas de auditoria.
-SET PERSIST log_output='TABLE';
-SET PERSIST general_log=ON;
-SET PERSIST log_error_verbosity=3;
+-- Root remoto y configuracion de logs: 00_Configuracion_Servidor.sql.
+-- Vista administrativa de rechazos; captura activada por 00.
 CREATE OR REPLACE SQL SECURITY DEFINER VIEW v_intentos_login_fallidos AS
 SELECT event_time,thread_id,user_host,argument FROM mysql.general_log
 WHERE command_type='Connect' AND argument LIKE 'Access denied%';
