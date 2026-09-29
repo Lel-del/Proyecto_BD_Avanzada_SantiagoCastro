@@ -49,8 +49,15 @@ GRANT SELECT ON ecommerce.v_ventas_sucursal TO 'Auditor_Financiero';
 GRANT SELECT ON ecommerce.v_detalles_sucursal TO 'Auditor_Financiero';
 GRANT SELECT ON ecommerce.productos TO 'Auditor_Financiero';
 -- 17. Solo catalogo publico, sin costos internos.
-GRANT SELECT ON ecommerce.productos TO 'Visitante';
+-- IF EXISTS permite instalar desde cero y corregir un permiso previo (MySQL 8.4).
+REVOKE IF EXISTS SELECT ON ecommerce.productos FROM 'Visitante';
 GRANT SELECT ON ecommerce.v_catalogo TO 'Visitante';
+-- Pruebas manuales en una NUEVA conexion como visitor_user, nunca como DBA:
+-- SET ROLE 'Visitante';
+-- SELECT costo, ubicacion FROM ecommerce.productos;
+-- Esperado: ERROR 1142 (42000), SELECT denegado sobre productos.
+-- SELECT * FROM ecommerce.v_catalogo;
+-- Esperado: consulta permitida; solo id_producto,nombre,descripcion,precio,stock,sku,id_categoria.
 
 -- 15. Componente oficial de MySQL Community. Requiere privilegios de administrador.
 -- Si el DBA ya instalo este componente, omitir solamente la siguiente sentencia.
